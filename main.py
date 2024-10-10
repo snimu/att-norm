@@ -528,6 +528,19 @@ def format_num_params(num_params: int, round_to_digits: int = 1) -> str:
     return f"{before_dot}{after_dot}{scalar}"
 
 
+def make_run_name(settings: dict[str, Any]) -> str:
+    name = f"{format_num_params(num_params=settings['num_params'], round_to_digits=0)}"
+    name += f"__qk_activ-{settings['qk_activ']}"
+    name += f"__qk_norm-{settings['qk_norm']}"
+    name += f"__attn_activ-{settings['attn_activ']}"
+    name += f"__post_attn_norm-{settings['post_attn_norm']}"
+    name += f"__width-{settings['width']}"
+    name += f"__depth-{settings['depth']}"
+    name += f"__num_heads-{settings['num_heads']}"
+    name += f"__seed-{settings['seed']}"
+    return name
+
+
 ########################################
 #           Train and Eval             #
 ########################################
@@ -576,6 +589,7 @@ def train(net: SpeedyLangNet | None = None, **settings):
     if settings['log_wandb']:
         wandb.finish()  # Finish any previous runs
         wandb.init(
+            name=make_run_name(settings),
             project=settings['wandb_project'], 
             config=settings,
         )
