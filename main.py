@@ -317,7 +317,7 @@ class LatentAttentionBlock(nn.Module):
             logits = torch.tanh(logits)
 
         if self.attn_activ in ("tanh", "none"):  # causal mask for tanh and none
-            logits = logits * torch.where(causal_mask[:x.shape[1], :x.shape[1]], 1.0, 0.0).as_type(x)
+            logits = logits * torch.where(causal_mask[:x.shape[1], :x.shape[1]], 1.0, 0.0).type_as(x)
 
         attention = logits @ value
 
