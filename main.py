@@ -905,6 +905,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--qk_activ",
         type=str, default="none", nargs="+",
+        choices=["gelu", "none"],
         help=
         "Activation function for the query and key projections. "
         "TYPE: str; DEFAULT: none"
@@ -912,6 +913,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--qk_norm",
         type=str, default="none", nargs="+",
+        choices=["fro_norm", "rms_norm", "none"],
         help=
         "Norm function for the query and key projections. "
         "TYPE: str; DEFAULT: none"
@@ -919,6 +921,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--attn_activ",
         type=str, default="softmax", nargs="+",
+        choices=["softmax", "tanh", "sigmoid", "none"],
         help=
         "Activation function for the attention. "
         "TYPE: str; DEFAULT: softmax"
@@ -926,6 +929,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--post_attn_norm",
         type=str, default="none", nargs="+",
+        choices=["rms_norm", "none"],
         help=
         "Norm function for the attention. "
         "TYPE: str; DEFAULT: none"
