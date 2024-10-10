@@ -286,16 +286,6 @@ class LatentAttentionBlock(nn.Module):
         # Fused into one kernel for memory+speed/etc
         query, key, linear, pre_gelu = F.linear(x, self.expand).split((self.qk_dim, self.qk_dim, self.expand_dim, self.expand_dim), dim=-1)
 
-        # QK activation
-        if self.qk_activ == "gelu":
-            query, key = F.gelu(query), F.gelu(key)
-
-        # QK norm
-        if self.qk_norm == "fro_norm":
-            query, key = query / torch.norm(query, keepdim=True), key / torch.norm(key, keepdim=True)
-        elif self.qk_norm == "rms_norm":
-            query, key = rms_norm(query), rms_norm(key)
-
         # Compute GeGLU (one portion of the channels this will stay locally, another will become the nonlinear value for attention)
         geglu = linear * F.gelu(pre_gelu)
 
@@ -304,6 +294,16 @@ class LatentAttentionBlock(nn.Module):
 
         # Reshape to num-heads
         query, key, mlp_out, value = map(lambda x: einops.rearrange(x, 'b n (h d) -> b h n d', h=self.num_heads), (query, key, mlp_out, value))
+
+        # QK activation
+        if self.qk_activ == "gelu":
+            query, key = F.gelu(query), F.gelu(key)
+
+        # QK norm
+        if self.qk_norm == "fro_norm":
+            query, key = query / torch.norm(query, dim=-1, keepdim=True), key / torch.norm(key, dim=-1, keepdim=True)
+        elif self.qk_norm == "rms_norm":
+            query, key = rms_norm(query), rms_norm(key)
 
         # Compute attention.
         logits = query @ key.transpose(-2, -1) / math.sqrt(self.qk_dim)
