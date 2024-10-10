@@ -18,7 +18,7 @@ except NameError:
 
 import itertools
 import argparse
-from typing import Any
+from typing import Any, Literal
 from functools import partial
 import subprocess
 
@@ -229,17 +229,39 @@ batch_index_offsets = torch.arange(0, hyp['misc']['sequence_length']['max']+1, d
 #            Network Components             #
 #############################################
 
+def rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Code copied from entropix https://github.com/xjdr-alt/entropix/tree/main
+    
+    (specifically, https://github.com/xjdr-alt/entropix/blob/main/entropix/torch_model.py#L25)
+
+    Removed the weights, though (for simplicity)
+    """
+    return (x * torch.rsqrt(torch.pow(x, 2).mean(-1, keepdim=True) + eps))
+
 class LatentAttentionBlock(nn.Module):
     """ Efficient fused latent-space attention block. Linear keys and queries, nonlinear values."""
-    def __init__(self, num_dim, linear_value: bool, num_heads: int):
+    def __init__(
+            self, 
+            num_dim, 
+            num_heads: int,
+            qk_activ: Literal["gelu", "none"],
+            qk_norm: Literal["fro_norm", "rms_norm", "none"],
+            attn_activ: Literal["softmax", "tanh", "sigmoid", "none"],
+            post_attn_norm: Literal["rms_norm", "none"],
+    ):
         super().__init__()
         # Layer dim parameters. Play around with these, there's likely some undiscovered stuff still!
         self.dim        = num_dim
         self.qk_dim     = self.dim//hyp['net']['qk_dim_div']
         self.v_dim      = num_dim
         self.expand_dim = num_dim * hyp['net']['expand_factor']
-        self.linear_value = linear_value 
         self.num_heads = num_heads
+
+        self.qk_activ = qk_activ
+        self.qk_norm = qk_norm
+        self.attn_activ = attn_activ
+        self.post_attn_norm = post_attn_norm
 
         # Main layer weights
         self.norm    = nn.LayerNorm(self.dim, bias=False)
@@ -253,8 +275,10 @@ class LatentAttentionBlock(nn.Module):
     def forward(self, x):
         residual = x
 
-        # Make additive attention mask, scaled by a learned mult for the position bias (lets us learn dynamic attention ranges per layer as needed)
-        attn_mask = torch.where(causal_mask[:x.shape[1], :x.shape[1]], F.softplus(self.position_bias_mult) * position_bias_base[:x.shape[1], :x.shape[1]], negative_infinity_matrix_base[:x.shape[1], :x.shape[1]])
+        # Make attention mask, scaled by a learned mult for the position bias (lets us learn dynamic attention ranges per layer as needed)
+        pos_encs = F.softplus(self.position_bias_mult) * position_bias_base[:x.shape[1], :x.shape[1]]
+        block_value = negative_infinity_matrix_base[:x.shape[1], :x.shape[1]] if self.attn_activ in ("softmax", "sigmoid") else 0.0
+        attn_mask = torch.where(causal_mask[:x.shape[1], :x.shape[1]], pos_encs, block_value).to("cuda").type_as(x)
 
         # Shared LayerNorm for linear layers and attention
         x = self.norm(x)
@@ -262,29 +286,52 @@ class LatentAttentionBlock(nn.Module):
         # Fused into one kernel for memory+speed/etc
         query, key, linear, pre_gelu = F.linear(x, self.expand).split((self.qk_dim, self.qk_dim, self.expand_dim, self.expand_dim), dim=-1)
 
+        # QK activation
+        if self.qk_activ == "gelu":
+            query, key = F.gelu(query), F.gelu(key)
+
+        # QK norm
+        if self.qk_norm == "fro_norm":
+            query, key = torch.norm(query), torch.norm(key)
+        elif self.qk_norm == "rms_norm":
+            query, key = rms_norm(query), rms_norm(key)
+
         # Compute GeGLU (one portion of the channels this will stay locally, another will become the nonlinear value for attention)
         geglu = linear * F.gelu(pre_gelu)
 
         # Partition between the input values and the v dim values
-        if self.linear_value:
-            geglu_local, _ = geglu.split((self.expand_dim-self.v_dim, self.v_dim), -1)
-            _, geglu_attention_value = pre_gelu.split((self.expand_dim-self.v_dim, self.v_dim), -1)
-        else:
-            geglu_local, geglu_attention_value = geglu.split((self.expand_dim-self.v_dim, self.v_dim), -1)
+        mlp_out, value = geglu.split((self.expand_dim-self.v_dim, self.v_dim), -1)
 
-        if self.num_heads > 1:
-            query, key, geglu_local, geglu_attention_value = map(lambda x: einops.rearrange(x, 'b n (h d) -> b h n d', h=self.num_heads), (query, key, geglu_local, geglu_attention_value))
+        # Reshape to num-heads
+        query, key, mlp_out, value = map(lambda x: einops.rearrange(x, 'b n (h d) -> b h n d', h=self.num_heads), (query, key, mlp_out, value))
 
+        # Compute attention.
+        logits = query @ key.transpose(-2, -1) / math.sqrt(self.qk_dim)
+        if self.attn_activ in ("softmax", "sigmoid"):
+            logits = logits + attn_mask
+        
+        if self.attn_activ == "softmax":
+            logits = F.softmax(logits, dim=-1)
+        elif self.attn_activ == "sigmoid":
+            logits = torch.sigmoid(logits)
+        elif self.attn_activ == "tanh":
+            logits = torch.tanh(logits)
 
-        # Compute attention. Something to note is that there are no attention heads here. This seemed to work a bit better, maybe due to not needing memory `.contiguous()` calls or similar
-        attention = F.scaled_dot_product_attention(query, key, geglu_attention_value, attn_mask=attn_mask)
+        if self.attn_activ in ("tanh", "none"):
+            logits = logits * attn_mask
 
-        if self.num_heads > 1:
-            attention = einops.rearrange(attention, 'b h n d -> b n (h d)')
-            geglu_local = einops.rearrange(geglu_local, 'b h n d -> b n (h d)')
+        attention = logits @ value
+
+        # Apply post-attention norm
+        if self.post_attn_norm == "rms_norm":
+            attention = rms_norm(attention)
+
+        # Re-shape back
+        attention = einops.rearrange(attention, 'b h n d -> b n (h d)')
+        mlp_out = einops.rearrange(mlp_out, 'b h n d -> b n (h d)')
 
         # Output linear layer
-        out = F.linear(torch.cat([geglu_local, attention], dim=-1), self.project)
+        out = F.linear(torch.cat([mlp_out, attention], dim=-1), self.project)
 
         # Add to residual
         x = residual + out
@@ -314,7 +361,14 @@ class SpeedyLangNet(nn.Module):
 
 def make_attn(settings: dict[str, Any]):
     # You can parametrically change anything you want about the attn blocks here
-    return LatentAttentionBlock(settings['width'], settings['linear_value'], settings['num_heads'])
+    return LatentAttentionBlock(
+        num_dim=settings['width'], 
+        num_heads=settings['num_heads'],
+        qk_activ=settings['qk_activ'],
+        qk_norm=settings['qk_norm'],
+        attn_activ=settings['attn_activ'],
+        post_attn_norm=settings['post_attn_norm'],
+    )
 
 
 def make_net(settings: dict[str, Any]):
@@ -849,13 +903,32 @@ def get_args() -> argparse.Namespace:
         "TYPE: int; DEFAULT: 1"
     )
     parser.add_argument(
-        "--linear_value",
-        type=int, default=0, nargs="+",
+        "--qk_activ",
+        type=str, default="none", nargs="+",
         help=
-        "If 0, use Gelu on the value in attention (the default setting of this package), else don't. "
-        "If you provide several values (for example, 0 1 2 3 4), "
-        "will be reduced to their booleans without repetition (so False, True). "
-        "TYPE: int; DEFAULT: 0"
+        "Activation function for the query and key projections. "
+        "TYPE: str; DEFAULT: none"
+    )
+    parser.add_argument(
+        "--qk_norm",
+        type=str, default="none", nargs="+",
+        help=
+        "Norm function for the query and key projections. "
+        "TYPE: str; DEFAULT: none"
+    )
+    parser.add_argument(
+        "--attn_activ",
+        type=str, default="softmax", nargs="+",
+        help=
+        "Activation function for the attention. "
+        "TYPE: str; DEFAULT: softmax"
+    )
+    parser.add_argument(
+        "--post_attn_norm",
+        type=str, default="none", nargs="+",
+        help=
+        "Norm function for the attention. "
+        "TYPE: str; DEFAULT: none"
     )
 
     # Other settings
@@ -890,15 +963,17 @@ def get_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # CHECK & PREPROCESS ARGS
-    args.depth = [args.depth] if isinstance(args.depth, int) else args.depth
-    args.width = [args.width] if isinstance(args.width, int) else args.width
+    args.depth = [args.depth] if isinstance(args.depth, int) else list(set(args.depth))
+    args.width = [args.width] if isinstance(args.width, int) else list(set(args.width))
     args.depth = [None if d < 1 else d for d in args.depth]
     args.width = [None if w < 1 else w for w in args.width]
-    args.num_heads = [args.num_heads] if isinstance(args.num_heads, int) else args.num_heads
+    args.num_heads = [args.num_heads] if isinstance(args.num_heads, int) else list(set(args.num_heads))
+    args.qk_activ = [args.qk_activ] if isinstance(args.qk_activ, str) else list(set(args.qk_activ))
+    args.qk_norm = [args.qk_norm] if isinstance(args.qk_norm, str) else list(set(args.qk_norm))
+    args.attn_activ = [args.attn_activ] if isinstance(args.attn_activ, str) else list(set(args.attn_activ))
+    args.post_attn_norm = [args.post_attn_norm] if isinstance(args.post_attn_norm, str) else list(set(args.post_attn_norm))
 
-    args.model_scale = [args.model_scale] if isinstance(args.model_scale, float) else args.model_scale
-    args.linear_value = [args.linear_value] if isinstance(args.linear_value, int) else args.linear_value
-    args.linear_value = list(set([bool(v) for v in args.linear_value]))
+    args.model_scale = [args.model_scale] if isinstance(args.model_scale, float) else list(set(args.model_scale))
 
     if any(d is None or w is None for d in args.depth for w in args.width):
         assert all(d is None and w is None for d in args.depth for w in args.width), (
@@ -931,18 +1006,28 @@ def get_settings(args: argparse.Namespace) -> list:
     # and you can handle that here.
 
     settings =  list(itertools.product(
-        args.model_scale, args.depth, args.width, args.num_heads, args.linear_value
+        args.model_scale, 
+        args.depth, 
+        args.width, 
+        args.num_heads, 
+        args.qk_activ,
+        args.qk_norm,
+        args.attn_activ,
+        args.post_attn_norm,
     ))
 
     settings = [
-        (model_scale, depth, width, num_heads, linear_value) 
-        for model_scale, depth, width, num_heads, linear_value in settings 
+        (model_scale, depth, width, num_heads, qk_activ, qk_norm, attn_activ, post_attn_norm) 
+        for model_scale, depth, width, num_heads, qk_activ, qk_norm, attn_activ, post_attn_norm in settings 
         if not setting_violates_rules(
             model_scale=model_scale, 
             depth=depth, 
             width=width, 
             num_heads=num_heads, 
-            linear_value=linear_value,
+            qk_activ=qk_activ,
+            qk_norm=qk_norm,
+            attn_activ=attn_activ,
+            post_attn_norm=post_attn_norm,
         )
     ]
 
@@ -964,7 +1049,7 @@ def main():
     settings = get_settings(args)
 
     if args.review_settings:
-        print_settings(settings, names=["model_scale", "depth", "width", "num_heads", "linear_value"])
+        print_settings(settings, names=["model_scale", "depth", "width", "num_heads", "qk_activ", "qk_norm", "attn_activ", "post_attn_norm"])
         proceed = input("Proceed? [y/n] ")
         if proceed.lower() != "y":
             print("Aborting.")
@@ -976,7 +1061,7 @@ def main():
     global hyp, model_scale
     change_gpu_token_capacity(args.gpu_capacity_scalar)
 
-    for setting_num, (model_scale, depth, width, num_heads, linear_value) in enumerate(settings):
+    for setting_num, (model_scale, depth, width, num_heads, qk_activ, qk_norm, attn_activ, post_attn_norm) in enumerate(settings):
         seed = args.seed  # reset seed so that every setting goes through the same seeds over the different runs
 
         # Change the model scale; width is rounded to nearest 64, and both are None if scaled by model_scale -> get depth and width here
@@ -989,7 +1074,10 @@ def main():
                 f"::: STARTING RUN {cumulative_run_num}/{total_num_runs} "
                 f"(Setting {setting_num+1}/{len(settings)}, Run {run_num+1}/{args.num_runs})"
                 f"\n:::    {num_heads=}"
-                f"\n:::    {linear_value=}"
+                f"\n:::    {qk_activ=}"
+                f"\n:::    {qk_norm=}"
+                f"\n:::    {attn_activ=}"
+                f"\n:::    {post_attn_norm=}"
                 f"\n:::    {model_scale=:.4f}"
                 f"\n:::    {depth=}"
                 f"\n:::    {width=}"
@@ -1017,7 +1105,10 @@ def main():
                 depth=depth,
                 width=width,
                 num_heads=num_heads,
-                linear_value=linear_value,
+                qk_activ=qk_activ,
+                qk_norm=qk_norm,
+                attn_activ=attn_activ,
+                post_attn_norm=post_attn_norm,
                 max_epochs=args.max_epochs,
                 max_steps=args.max_steps,
                 max_tokens=args.max_tokens,
@@ -1046,7 +1137,10 @@ def main():
                 "num_params": [num_params],
                 "num_non_embedding_params": [num_non_embedding_params],
                 "num_heads": [num_heads],
-                "linear_value": [linear_value],
+                "qk_activ": [qk_activ],
+                "qk_norm": [qk_norm],
+                "attn_activ": [attn_activ],
+                "post_attn_norm": [post_attn_norm],
                 "seed": [seed],
                 "run_num": [run_num+1],
                 "max_epochs": [args.max_epochs],
