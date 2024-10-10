@@ -292,7 +292,7 @@ class LatentAttentionBlock(nn.Module):
 
         # QK norm
         if self.qk_norm == "fro_norm":
-            query, key = torch.norm(query), torch.norm(key)
+            query, key = query / torch.norm(query, keepdim=True), key / torch.norm(key, keepdim=True)
         elif self.qk_norm == "rms_norm":
             query, key = rms_norm(query), rms_norm(key)
 
