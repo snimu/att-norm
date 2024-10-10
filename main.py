@@ -307,8 +307,7 @@ class LatentAttentionBlock(nn.Module):
 
         # Compute attention.
         logits = query @ key.transpose(-2, -1) / math.sqrt(self.qk_dim)
-        if self.attn_activ in ("softmax", "sigmoid"):
-            logits = logits + attn_mask
+        logits = logits + attn_mask  # for sigmoid and softmax, this is causal mask; for all four, it's positional encs
         
         if self.attn_activ == "softmax":
             logits = F.softmax(logits, dim=-1)
@@ -317,8 +316,8 @@ class LatentAttentionBlock(nn.Module):
         elif self.attn_activ == "tanh":
             logits = torch.tanh(logits)
 
-        if self.attn_activ in ("tanh", "none"):
-            logits = logits * attn_mask
+        if self.attn_activ in ("tanh", "none"):  # causal mask for tanh and none
+            logits = logits * torch.where(causal_mask[:x.shape[1], :x.shape[1]], 1.0, 0.0).as_type(x)
 
         attention = logits @ value
 
