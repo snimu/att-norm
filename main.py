@@ -529,14 +529,14 @@ def format_num_params(num_params: int, round_to_digits: int = 1) -> str:
 
 def make_run_name(settings: dict[str, Any]) -> str:
     name = f"{format_num_params(num_params=settings['num_params'], round_to_digits=0)}"
-    name += f"__qk_a-{settings['qk_activ']}"
-    name += f"__qk_n-{settings['qk_norm']}"
-    name += f"__attn_a-{settings['attn_activ']}"
-    name += f"__attn_n-{settings['post_attn_norm']}"
-    name += f"__w-{settings['width']}"
+    name += f"_qk.activ-{settings['qk_activ']}" if settings['qk_activ'] != "none" else ""
+    name += f"_qk.norm-{settings['qk_norm']}" if settings['qk_norm'] != "none" else ""
+    name += f"_attn.activ-{settings['attn_activ']}" if settings['attn_activ'] != "none" else ""
+    name += f"_attn.norm-{settings['post_attn_norm']}" if settings['post_attn_norm'] != "none" else ""
+    name += f"_w-{settings['width']}"
     name += f"_d-{settings['depth']}"
     name += f"_h-{settings['num_heads']}"
-    name += f"_s-{settings['seed']}"
+    name += f"_seed-{settings['seed']}"
     return name
 
 
