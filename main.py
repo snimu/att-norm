@@ -533,10 +533,10 @@ def make_run_name(settings: dict[str, Any]) -> str:
     name += f"__qk_norm-{settings['qk_norm']}"
     name += f"__attn_activ-{settings['attn_activ']}"
     name += f"__post_attn_norm-{settings['post_attn_norm']}"
-    name += f"__width-{settings['width']}"
-    name += f"__depth-{settings['depth']}"
-    name += f"__num_heads-{settings['num_heads']}"
-    name += f"__seed-{settings['seed']}"
+    name += f"__w-{settings['width']}"
+    name += f"_d-{settings['depth']}"
+    name += f"_h-{settings['num_heads']}"
+    name += f"_s-{settings['seed']}"
     return name
 
 
