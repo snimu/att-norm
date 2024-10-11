@@ -69,3 +69,11 @@ Now, trying some specific combinations of settings (for `attn_activ=sigmoid` and
   - Results:
     - The `fro_norm` simply destroys performance in all cases.
     - For `qk_norm=none`, the `gelu` activation actually seems to worsen performance a bit.
+
+## 2024-10-11
+
+First off, holy fuck F.scaled_dot_product_attention is so efficient! Using my self-cooked, manually implemented attention version takes sooo much memory it's crazy. Have to run the script with --gpu_capacity_scalar 1.5 for it to work *on an H100*!
+
+I'm beginning to suspect that the norms are a problem not because they are bad, but because they change training dynamics so much and I haven't tuned the hyperparameters for them at all. Why do I think that? The microbatch-number per update is dynamically adjusted depending on the grad norm; so if something is wrong with the batch norm, the microbatch-number is very large. We will see few updates before 1 epoch is done; and that is exactly what is happening.
+
+So maybe I should tune the small model for the norms next?
