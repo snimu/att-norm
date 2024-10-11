@@ -1,6 +1,7 @@
 
 import ast
 from typing import Literal
+from collections.abc import Sequence
 
 import colorsys
 import matplotlib.pyplot as plt
@@ -240,16 +241,21 @@ def unique_depths(file: str) -> np.ndarray:
         .to_numpy()
     )
 
+QK_ACTIV_TYPE = Literal["gelu", "none"]
+QK_NORM_TYPE = Literal["fro_norm", "rms_norm", "none"]
+ATTN_ACTIV_TYPE = Literal["softmax", "sigmoid", "tanh", "none"]
+POST_ATTN_NORM_TYPE = Literal["rms_norm", "none"]
+
 
 def plot_results(
         file: str,
-        depth: int | None = 8,
-        width: int | None = 384,
-        num_heads: int | None = None,
-        qk_activ: Literal["gelu", "none"] | None = None,
-        qk_norm: Literal["fro_norm", "rms_norm", "none"] | None = None,
-        attn_activ: Literal["softmax", "sigmoid"] | None = None,
-        post_attn_norm: Literal["rms_norm", "none"] | None = None,
+        depth: int | Sequence[int] | None = 8,
+        width: int | Sequence[int] | None = 384,
+        num_heads: int | Sequence[int] | None = None,
+        qk_activ: QK_ACTIV_TYPE | Sequence[QK_ACTIV_TYPE] | None = None,
+        qk_norm: QK_NORM_TYPE | Sequence[QK_NORM_TYPE] | None = None,
+        attn_activ: ATTN_ACTIV_TYPE | Sequence[ATTN_ACTIV_TYPE] | None = None,
+        post_attn_norm: POST_ATTN_NORM_TYPE | Sequence[POST_ATTN_NORM_TYPE] | None = None,
         to_plot: Literal["val_loss", "train_losses", "val_accs", "train_accs", "val_pplxs"] = "val_loss",
         plot_over: Literal["step", "epoch", "token", "time_sec"] = "epoch",
         show: bool = True,
@@ -258,20 +264,28 @@ def plot_results(
 ) -> None:
     settings = get_unique_settings(file, ["num_heads", "qk_activ", "qk_norm", "attn_activ", "post_attn_norm", "depth", "width"])
 
+    depth = [depth] if isinstance(depth, int) else depth
+    width = [width] if isinstance(width, int) else width
+    num_heads = [num_heads] if isinstance(num_heads, int) else num_heads
+    qk_activ = [qk_activ] if isinstance(qk_activ, str) else qk_activ
+    qk_norm = [qk_norm] if isinstance(qk_norm, str) else qk_norm
+    attn_activ = [attn_activ] if isinstance(attn_activ, str) else attn_activ
+    post_attn_norm = [post_attn_norm] if isinstance(post_attn_norm, str) else post_attn_norm
+
     if num_heads is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if nh == num_heads]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if nh in num_heads]
     if qk_activ is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if qka == qk_activ]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if qka in qk_activ]
     if qk_norm is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if qkn == qk_norm]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if qkn in qk_norm]
     if attn_activ is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if aa == attn_activ]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if aa in attn_activ]
     if post_attn_norm is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if pan == post_attn_norm]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if pan in post_attn_norm]
     if depth is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if d == depth]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if d in depth]
     if width is not None:
-        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if w == width]
+        settings = [(nh, qka, qkn, aa, pan, d, w) for nh, qka, qkn, aa, pan, d, w in settings if w in width]
 
     colors = generate_distinct_colors(len(settings))
 
@@ -282,6 +296,9 @@ def plot_results(
                 width=width_,
                 num_heads=num_heads_,
                 qk_activ=qk_activ_,
+                qk_norm=qk_norm_,
+                attn_activ=attn_activ_,
+                post_attn_norm=post_attn_norm_,
                 to_plot=to_plot,
                 plot_over=plot_over,
             )
@@ -337,10 +354,10 @@ if __name__ == "__main__":
         depth=None,
         width=None,
         num_heads=None,
-        qk_activ=None,
-        qk_norm=None,
-        attn_activ=None,
-        post_attn_norm=None,
+        qk_activ=["gelu", "none"],
+        qk_norm=["rms_norm", "none"],
+        attn_activ=["sigmoid", "softmax"],
+        post_attn_norm="none",
         to_plot="val_loss",
         plot_over="epoch",
         show=True,
