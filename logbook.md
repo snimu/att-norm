@@ -77,3 +77,10 @@ First off, holy fuck F.scaled_dot_product_attention is so efficient! Using my se
 I'm beginning to suspect that the norms are a problem not because they are bad, but because they change training dynamics so much and I haven't tuned the hyperparameters for them at all. Why do I think that? The microbatch-number per update is dynamically adjusted depending on the grad norm; so if something is wrong with the batch norm, the microbatch-number is very large. We will see few updates before 1 epoch is done; and that is exactly what is happening.
 
 So maybe I should tune the small model for the norms next?
+
+## 2024-10-12
+
+### 2024-10-12: Results of yesterday's ablations
+
+- `post_attn_norm` should just be `none`
+- `qk_norm`: `none` > `rms_norm` > `fro_norm` but the difference is small enough that proper tuning might fix it?
