@@ -573,6 +573,29 @@ def write_tokenizer(enc, filename):
             file.write(b)  # Write the actual bytes
     print(f"wrote {filename}")
 
+
+def format_num_params(num_params: int, round_to_digits: int = 1) -> str:
+    if num_params < 1_000:
+        pnum = str(round(num_params, max(0, round_to_digits)))
+        scalar = ""
+    elif num_params < 1_000_000:
+        pnum = f"{round(num_params/1_000, max(0, round_to_digits))}"
+        scalar = "k"
+    elif num_params < 1_000_000_000:
+        pnum = f"{round(num_params/1_000_000, max(0, round_to_digits))}"
+        scalar = "M"
+    else:
+        pnum = f"{round(num_params/1_000_000_000, max(0, round_to_digits))}"
+        scalar = "B"
+
+    before_dot = pnum.split(".")[0]
+    after_dot = pnum.split(".")[1] if "." in pnum else ""
+    after_dot = "" if after_dot and (round_to_digits <= 0) else after_dot
+    after_dot = "" if after_dot and (int(after_dot) == 0) else after_dot
+    after_dot = "." + after_dot if after_dot else ""
+
+    return f"{before_dot}{after_dot}{scalar}"
+
 # -----------------------------------------------------------------------------
 # int main
 
@@ -604,9 +627,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_iterations", type=int, default=10, help="number of iterations to run")
     parser.add_argument("--inference_only", type=int, default=0, help="only run inference")
     # optimization
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate warmup iterations")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--warmup_iters", type=int, default=0, help="learning rate warmup iterations")
-    parser.add_argument("--learning_rate_decay_frac", type=float, default=1.0, help="learning rate warmup iterations")
+    parser.add_argument("--learning_rate_decay_frac", type=float, default=1.0, help="learning rate deday fraction")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="maximum gradient magnitude")
     # evaluation
@@ -614,7 +637,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_max_steps", type=int, default=20, help="how many batches of val to average?")
     parser.add_argument("--sample_every", type=int, default=0, help="how often to sample from the model?")
     # debugging
-    parser.add_argument("--overfit_single_batch", type=int, default=1, help="overfit just one batch of data")
+    parser.add_argument("--overfit_single_batch", type=int, default=0, help="overfit just one batch of data")
     # numerics
     parser.add_argument("--tensorcores", type=int, default=0, help="use tensorcores")
     # memory management
@@ -624,7 +647,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="float32", help="float32|float16|bfloat16")
     parser.add_argument("--zero_stage", type=int, default=0, help="zero redundancy optimizer stage (0/1/2/3)")
     # python -> C bridge
-    parser.add_argument("--write_tensors", type=int, default=1, help="write tensors to disk")
+    parser.add_argument("--write_tensors", type=int, default=0, help="write tensors to disk")
     # settings to be evaluated
     parser.add_argument("--qk_norm", choices=['none', 'fro_norm', 'rms_norm'], default='none')
     parser.add_argument("--qk_activ", choices=['none', 'gelu'], default='none')
@@ -679,8 +702,8 @@ if __name__ == "__main__":
 
     # calculate gradient accumulation from the desired total batch size and the current run configuration
     tokens_per_fwdbwd = B * T * ddp_world_size
-    assert args.total_batch_size % tokens_per_fwdbwd == 0
-    grad_accum_steps = args.total_batch_size // tokens_per_fwdbwd
+    # assert args.total_batch_size % tokens_per_fwdbwd == 0
+    grad_accum_steps = 1  # args.total_batch_size // tokens_per_fwdbwd
     print0(f"total desired batch size: {args.total_batch_size}")
     print0(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
@@ -727,6 +750,8 @@ if __name__ == "__main__":
     else:
         # load the GPT-2 model weights
         model = GPT.from_pretrained(args.model)
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print0(f"number of parameters: {num_params:_} ({format_num_params(num_params)})")
     model.train()
     model.to(device)
     if args.compile:
@@ -802,8 +827,8 @@ if __name__ == "__main__":
         with open(logfile, "w") as f:
             pass
 
-    if master_process and args.wand_project is not None:
-        run_name = args.model
+    if master_process and args.wandb_project is not None:
+        run_name = args.model + "_" + format_num_params(num_params)
         run_name += f"_qk.{args.qk_activ}" if args.qk_activ != 'none' else ""
         run_name += f"_qk.{args.qk_norm}" if args.qk_norm != 'none' else ""
         run_name += f"_att.{args.att_activ}"
@@ -811,12 +836,14 @@ if __name__ == "__main__":
         run_name += "_scale_attn_weights" if args.scale_attn_weights else ""
         wandb.init(
             name=run_name,
+            project=args.wandb_project,
             config={
                 "qk_activ": args.qk_activ,
                 "qk_norm": args.qk_norm,
                 "att_activ": args.att_activ,
                 "post_att_norm": args.post_att_norm,
                 "scale_attn_weights": args.scale_attn_weights,
+                "num_params": num_params,
             }
         )
 
@@ -933,6 +960,7 @@ if __name__ == "__main__":
                 {
                     "train/loss": lossf,
                     "train/step": step,
+                    "tokens_seen": int((step+1) * grad_accum_steps * ddp_world_size * B * T),
                     "lr": lr,
                     "grad_norm": norm.mean().item(),
                 }
