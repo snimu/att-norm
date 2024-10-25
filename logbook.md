@@ -109,3 +109,7 @@ Early results:
   - Sigmoid still isn't as good as softmax without the logit scaling
   - I should try the actual positional encodings next (in addition to RoPE!)
 
+Result with hlb-gpt-style positional encodings:
+
+- Makes basically zero difference.
+
