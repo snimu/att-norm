@@ -84,3 +84,28 @@ So maybe I should tune the small model for the norms next?
 
 - `post_attn_norm` should just be `none`
 - `qk_norm`: `none` > `rms_norm` > `fro_norm` but the difference is small enough that proper tuning might fix it?
+
+
+## 2024-10-13
+
+- Still no real difference between `sigmoid` and `softmax` if all others are `none`
+- `qk_activ`: no difference between `gelu` and `none`
+- `qk_norm`: `none` >> `rms_norm` > `fro_norm` for both `sigmoid` and `softmax`
+
+Might the problem be the positional encodings? They are applied with the attention mask instead on Q and K directly! I should try this with a different repo. Probably [llm.c](https://github.com/karpathy/llm.c/blob/master/train_gpt2.py).
+
+
+## 2024-10-25
+
+Started training with llm.c by karpathy.
+
+Early results:
+
+- sigmoid is significantly worse than softmax
+  - Why is this not the case for hlb-gpt?
+  - I'm guessing that it's because of the positional encodings
+  - In that case, scaling the attention logits should help
+- Scaling attention logits *does* help, but similarly for softmax and sigmoid
+  - Sigmoid still isn't as good as softmax without the logit scaling
+  - I should try the actual positional encodings next (in addition to RoPE!)
+
