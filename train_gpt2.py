@@ -29,6 +29,7 @@ from typing import Literal
 
 import wandb
 import numpy as np
+import einops
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -61,6 +62,16 @@ def rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return (x * torch.rsqrt(torch.pow(x, 2).mean(-1, keepdim=True) + eps))
 
 
+def make_att_bias(seq_len):
+    bias_range = torch.arange(-seq_len+1, 1)
+    att_bias = bias_range.unsqueeze(0) - bias_range.unsqueeze(1) 
+    att_bias = einops.rearrange(att_bias, 's1 s2 -> 1 1 s1 s2')
+    return att_bias
+
+
+ATT_BIAS = None
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -80,6 +91,10 @@ class CausalSelfAttention(nn.Module):
             self.q_scale = nn.Parameter(torch.ones(1, config.n_head, 1, 1))  # q-shape: (B, nh, T, hs)
         else:
             self.q_scale = None
+        if config.att_bias:
+            self.att_bias_mult = nn.Parameter(torch.ones(1, config.n_head, 1, 1))  # att-shape: (B, nh, T, T)
+        else:
+            self.att_bias_mult = None
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -122,6 +137,9 @@ class CausalSelfAttention(nn.Module):
             # Scaling attention logits
             if self.att_scale is not None:
                 att = att * self.att_scale
+            # Attention bias
+            if self.att_bias_mult is not None:
+                att = att + self.att_bias_mult * ATT_BIAS
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             # Attention activation
             if self.att_activ == "softmax":
@@ -182,6 +200,7 @@ class GPTConfig:
     post_att_norm: Literal['none', 'rms_norm'] = 'none'
     scale_attn_weights: bool = False
     scale_q_weights: bool = False
+    att_bias: bool = False
 
 
 class GPT(nn.Module):
@@ -664,6 +683,7 @@ if __name__ == "__main__":
     parser.add_argument("--post_att_norm", choices=['none', 'rms_norm'], default='none')
     parser.add_argument("--scale_attn_weights", action="store_true", help="scale the attention weights")
     parser.add_argument("--scale_q_weights", action="store_true", help="scale the Q weights")
+    parser.add_argument("--att_bias", action="store_true", help="add attention bias")
     # extra
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--wandb_project", type=str, default=None)
@@ -674,6 +694,9 @@ if __name__ == "__main__":
     assert 1 <= T <= 1024
     assert args.dtype in {"float32", "float16", "bfloat16"}
     assert args.model in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl", "d12", "d24", "d36", "d48"}
+
+    if args.att_bias:
+        ATT_BIAS = make_att_bias(T)
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -765,6 +788,7 @@ if __name__ == "__main__":
     print0(f"number of parameters: {num_params:_} ({format_num_params(num_params)})")
     model.train()
     model.to(device)
+    ATT_BIAS = ATT_BIAS.to(device) if args.att_bias else None
     if args.compile:
         if hasattr(config, "coordinate_descent_tuning"):
             config.coordinate_descent_tuning = True # suggested by @Chillee
@@ -846,6 +870,7 @@ if __name__ == "__main__":
         run_name += f"_att.{args.post_att_norm}" if args.post_att_norm != 'none' else ""
         run_name += "_scale_attn_weights" if args.scale_attn_weights else ""
         run_name += "_scale_q_weights" if args.scale_q_weights else ""
+        run_name += "_att_bias" if args.att_bias else ""
         run_name += f"_seed.{args.seed}"
         wandb.init(
             name=run_name,
