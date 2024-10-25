@@ -73,9 +73,9 @@ class CausalSelfAttention(nn.Module):
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
         # scaling
         if config.scale_attn_weights:
-            self.attn_scale = nn.Parameter(torch.ones(1, config.n_head, 1, 1))  # att-shape: (B, nh, T, T)
+            self.att_scale = nn.Parameter(torch.ones(1, config.n_head, 1, 1))  # att-shape: (B, nh, T, T)
         else:
-            self.attn_scale = None
+            self.att_scale = None
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -112,8 +112,8 @@ class CausalSelfAttention(nn.Module):
             # manual implementation of attention
             # this materializes the large (T,T) matrix for all the queries and keys
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            if self.attn_scale is not None:
-                att = att * self.attn_scale
+            if self.att_scale is not None:
+                att = att * self.att_scale
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             # Attention activation
             if self.att_activ == "softmax":
@@ -834,6 +834,7 @@ if __name__ == "__main__":
         run_name += f"_att.{args.att_activ}"
         run_name += f"_att.{args.post_att_norm}" if args.post_att_norm != 'none' else ""
         run_name += "_scale_attn_weights" if args.scale_attn_weights else ""
+        run_name += f"_seed.{args.seed}"
         wandb.init(
             name=run_name,
             project=args.wandb_project,
